@@ -1,5 +1,7 @@
 # Hy-SimulMT alignment
 
+Latest: [2026-11-04 main integration validation](validation.md#main-integration-2026-11-04), including both complete variants on local CPU/Auto and CLI/HTTP. Earlier dated measurements remain below.
+
 Targets Tencent's `Hy-SimulMT-30B-A3B-GGUF` and
 `Hy-SimulMT-30B-A3B-Interleave-GGUF`, using their bundled `hyv3_speech`
 audio tower. The decoder architecture is explicitly `hy_v3`.

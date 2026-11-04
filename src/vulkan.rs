@@ -1413,7 +1413,9 @@ impl VulkanContext {
         // turning on while looking for one.
         let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
         let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
-        let layer_names: Vec<*const i8> = if validation_requested {
+        // `c_char` is `i8` on x86_64 but `u8` on aarch64, so spell it out
+        // instead of hardcoding `i8` or this fails to build on ARM.
+        let layer_names: Vec<*const std::ffi::c_char> = if validation_requested {
             vec![validation_layer.as_ptr()]
         } else {
             Vec::new()
@@ -1949,7 +1951,11 @@ impl VulkanContext {
             let create_info = vk::ComputePipelineCreateInfo {
                 s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: std::ptr::null(),
-                flags: Default::default(),
+                flags: if std::env::var_os("RMI_VK_NO_OPT").is_some() {
+                    vk::PipelineCreateFlags::DISABLE_OPTIMIZATION
+                } else {
+                    vk::PipelineCreateFlags::empty()
+                },
                 stage,
                 layout: pipeline_layout,
                 base_pipeline_handle: vk::Pipeline::null(),
@@ -2279,6 +2285,14 @@ impl std::fmt::Display for VulkanError {
             VulkanError::UnsupportedShape(s) => write!(f, "Unsupported shape: {}", s),
             VulkanError::Timeout => write!(f, "GPU dispatch timed out"),
         }
+    }
+}
+
+/// The device errors carry their own message, so a caller that reports a
+/// failure as a string does not have to spell the conversion out.
+impl From<VulkanError> for String {
+    fn from(error: VulkanError) -> Self {
+        error.to_string()
     }
 }
 

@@ -1245,5 +1245,427 @@
       "relative_rms": 0.15149625684956985,
       "cosine": 0.9942768631809429
     }
+  },
+  "main_integration_2026_11_04": {
+    "previous_head": "247e8fe2d8f638a4c9e233c71c3d63ca484bb5e2",
+    "merged_main": "f4aa9d15526ec3af828c8c93f9bb943b45069e08",
+    "host": "Apple M3 Max / MoltenVK 1.4.2 / Rust 1.98.1 / release-fast / native NEON",
+    "model_settings": "Both complete Q4_K_M variants, 4 threads, F32 KV, JFK 3.2 seconds, three turns, max_tokens=64",
+    "weights_sha256_verified": true,
+    "oracle_reference": "Existing independent native NEON reference and repacking baseline at e41ca4212f786815faa37606ee2e6fcf8611f9e4; unchanged calibration and hard caps",
+    "test_source_sha256": {
+      "src/compute/linear.rs": "06f7f8c910fb49a3c0de0e24a88fad4ee2f64a8bceb1f96acb7eb4b3e6567231",
+      "src/vulkan/ops.rs": "6e885900e73a401bf5c11c9694f3ead30a1bcd56f7b2db026e4d3243d76e6a9f",
+      "src/ops/quant/neon_k.rs": "d5f5dd03631c6514841ed86e06a17bac1af97ffa048b1769e49efc13c33481b5",
+      "src/ops/quant/mod.rs": "8bf09fcffd4d28569d298c035795e9dbc0af7ce3b06242ee95a71ba82afba984",
+      "src/app/server/mod.rs": "a80b957d59541f7ec9d89ed8a2f2bd12ff78a5f6e6a6c546c81f93039af24c3f",
+      "src/core/tokenizer/mod.rs": "bb809943d7b85b32d8577f5b1cab27430cc2a0426b91598aaf08d9f450c55f03",
+      "shaders/glsl/f16_matmul.comp": "ee366f503024541aa800e8d4d60fd298e08f1c26c8946fcc250179a8db26330a",
+      "shaders/glsl/f16_matmul_tiled.comp": "3352301fc2613b0c66e9918ee83b437fb4c016c5f3775f8d90a4f3b2398d13a3",
+      "shaders/bin/f16_matmul.spv": "0a7713c6024f211bceba84a234da97f12527096ebe2bfedcaab7f54ffeaccbb0",
+      "shaders/bin/f16_matmul_tiled.spv": "42a6d19a4437af40b30a81291b787380097b328354182bc57217a31f5d1bd01a"
+    },
+    "full_library": [
+      {
+        "configuration": "default",
+        "exit_code": 101,
+        "summaries": [
+          "test result: FAILED. 1369 passed; 21 failed; 89 ignored; 0 measured; 0 filtered out; finished in 26.58s"
+        ],
+        "failed_names": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ],
+        "added_failures": [
+          "app::media::tests::stereo_uploads_are_refused"
+        ],
+        "removed_failures": []
+      },
+      {
+        "configuration": "vulkan",
+        "exit_code": 101,
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.13s",
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.00s",
+          "test result: FAILED. 1474 passed; 25 failed; 204 ignored; 0 measured; 0 filtered out; finished in 30.58s"
+        ],
+        "failed_names": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ],
+        "added_failures": [
+          "app::media::tests::stereo_uploads_are_refused"
+        ],
+        "removed_failures": []
+      }
+    ],
+    "added_failure_disposition": {
+      "app::media::tests::stereo_uploads_are_refused": "Also fails on an untouched git archive of main f4aa9d15 with the same FFmpeg-equipped host: the supported FFmpeg path downmixes stereo. The media source is byte-identical to main."
+    },
+    "focused": [
+      {
+        "name": "linear-device-fixed",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "compute::linear::tests::",
+          "--",
+          "--ignored",
+          "--skip",
+          "scalar_linear_selection",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1697 filtered out; finished in 0.91s"
+        ]
+      },
+      {
+        "name": "runtime-device",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::ops::tests::batched_linear_device_",
+          "--",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1696 filtered out; finished in 0.72s"
+        ]
+      },
+      {
+        "name": "exit-audit",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "ops::float::tests::shared_vulkan_context_cleans_up_before_driver_exit",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 1.18s"
+        ]
+      },
+      {
+        "name": "shutdown",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::tests::vulkan_shutdown_drains_device_and_rejects_later_submissions",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.40s"
+        ]
+      },
+      {
+        "name": "private-context-smoke",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::tests::initializes_with_homebrew_moltenvk",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.36s"
+        ]
+      },
+      {
+        "name": "hy-scalar",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "hy_",
+          "--",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "RMI_SCALAR": "1"
+        },
+        "summaries": [
+          "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 1684 filtered out; finished in 0.03s"
+        ]
+      },
+      {
+        "name": "linear-scalar",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "compute::linear::tests::scalar_linear_selection_does_not_initialize_a_device",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "RMI_SCALAR": "1"
+        },
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.00s"
+        ]
+      },
+      {
+        "name": "build",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace,vulkan",
+          "--bin",
+          "rust-model-inference",
+          "--bin",
+          "rust-model-server",
+          "--example",
+          "hy_simulmt_parity"
+        ],
+        "environment": {},
+        "summaries": []
+      },
+      {
+        "name": "hy-contract-entries",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace,vulkan",
+          "--test",
+          "hy_simulmt",
+          "--test",
+          "hy_simulmt_entries",
+          "--",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "test result: ok. 2 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ]
+      }
+    ],
+    "real_models": [
+      {
+        "name": "standard-cpu-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.08619669141420498,
+        "min_logit_cosine": 0.9963898414050814,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809429
+        }
+      },
+      {
+        "name": "standard-auto-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.08386863843663912,
+        "min_logit_cosine": 0.997444530911615,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809429
+        }
+      },
+      {
+        "name": "standard-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 65.85s"
+        ]
+      },
+      {
+        "name": "standard-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 555,
+        "submissions": 568,
+        "peak_allocation_bytes": 2631209472
+      },
+      {
+        "name": "standard-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      },
+      {
+        "name": "interleave-cpu-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.11466403716398701,
+        "min_logit_cosine": 0.9934250301082409,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815912
+        }
+      },
+      {
+        "name": "interleave-auto-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.15442687447684955,
+        "min_logit_cosine": 0.9891395041369556,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815912
+        }
+      },
+      {
+        "name": "interleave-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 52.70s"
+        ]
+      },
+      {
+        "name": "interleave-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 150,
+        "submissions": 163,
+        "peak_allocation_bytes": 1325069760
+      },
+      {
+        "name": "interleave-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      }
+    ],
+    "shader_validation": {
+      "manifest": "passed",
+      "spirv_val_vulkan_1_1": {
+        "passed": 54
+      },
+      "full_rebuild_check": "Fails at byte comparison of unchanged softmax.spv on both this merge and untouched main; no full byte-rebuild pass claimed."
+    },
+    "limits": "Local validation only; NVIDIA, other complete quantizations, long recordings and performance speedup were not measured. Interleave GPU decoder gate and unsupported JEV/full-device policies remain.",
+    "local_evidence": "target/hy-main-2026-11-04/"
   }
 }

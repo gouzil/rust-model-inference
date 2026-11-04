@@ -393,6 +393,21 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       改成惰性的 `Weight` / `QuantizedTensor` 会动到已验证的数值路径，只放宽解码面。
       回归测试 `minicpmv::weights::decode_matrix_tests`（含 F32/F16 不变、
       不支持的类型仍报出类型名）。
+- [ ] **Audio8 fused layer（单 submit/层）未完成** — 当前 GPU 模式每层 8 次 submit
+       （2 norm + QKV + attention + O + gate_up + SiLU + down），每次 ~0.25ms 固定开销，
+       36 层 × 116 步 ≈ 32K 次提交，submit 开销主导了 GPU 模式 13.5s 的总耗时
+       （CPU 模式 10.5s 反而更快）。fused layer 的目标是把一整层的 8 个 op 录进同一个
+       command buffer，单次 submit。**未实施原因**：
+       1. 会破坏 `LinearExecutor` 的 CPU/GPU 自动分发——matmul 必须从 `LinearExecutor`
+          抽到 fused path，`ComputePolicy::Auto` 的 per-op 粒度选择变成 per-layer 二元选择；
+       2. `BatchedLinearRuntime` 和 `Audio8GpuCompute` 各有独立 `Qwen3Ops` arena，跨 arena
+          数据必须经 CPU readback，不共享 arena 无法真正 fused；
+       3. 需要大规模重构才能让数据在 GPU 内部流动（残差常驻设备、共享 arena 所有权）。
+       **暂缓策略**：先把算子加速做好（F16/BF16 GPU matmul 带宽优化、k-quant shader
+       u32 字解包、GPU attention/norm/SiLU 集成已完成），多探索几个模型验证通用性，
+       再回头看 fused 问题——届时可能有更清晰的 session 所有权模型可以复用。
+       关联文件：`src/models/audio8/gpu.rs`、`src/models/audio8/text.rs`、
+       `src/compute/linear.rs`、`src/vulkan/ops.rs`。
 
 
 ## Medium Priority
@@ -438,13 +453,17 @@ MiniCPM-V 4.7 的 `qwen35moe`（35B-A3B）此前只在**生成面**注册，多�
       （`parity_trace::full_f32` 用 `format!("{trace}.{name}.f32")`，
       trace 路径是 "1" 时就落在 cwd）。修法：测试结束时恢复原值，
       或改用 `TempDir` 下的绝对路径。
-- [ ] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
+- [x] **`kquants.py` 的 Q6_K 批大小估算偏低** — `--format q6_k` 量化 783 MB 的
       `gliner2.5-base-v1` 跑 15 分钟未完成（Q4_K 同输入 4.5 分钟）。`_Q6K_BYTES_PER_BLOCK`
       记的是 `16 × 19 × 8 × 3`（每个 256 元素 super-block 的 19-candidate scale 搜索），
       但 `_q6k_batch` 实际还要为整个 `(n, 256)` batch 分配 F32 输入、副本与打包中间量，
       远不止这个数，于是 `K_SEARCH_BUDGET_BYTES` 形同虚设、批大到吃满内存。修法是让
       `_Q6K_BYTES_PER_BLOCK` 覆盖真实的瞬时占用（或直接给 `_q6k_batch` 一个独立的
       批上限），Q4_K 侧同样值得复核。`q4_k` 与 `q8_0` 两条路径已验证，不受此影响。
+      → 已修：不再靠字节预算推批大小，改为 `K_SEARCH_MAX_BLOCKS = 256` 的显式上限
+      （搜索按 super-block 独立，任意批大小输出逐字节一致）。单线程 NumPy、8.4M 值实测：
+      Q4_K 从 2.22 M values/s、峰值 RSS 5.5 GiB 变为 3.35 M values/s、150 MiB；
+      同样的上限也让 Q6_K 受益。`tools/converter/utils/test_kquants.py` 的定值摘要不变。
 - [ ] **Q8_0 与 Q8_K 量化路径按需量化（消除冗余计算，保留两份 buffer）** — dispatch 按 layer 权重格式，省一次量化 pass
 - [ ] **Qwen3.5：借用权重与 FFN gate/up 输入量化复用的取舍** — 中期重构，不阻塞局部 FFN 优化
 - [ ] **删掉三个纯转发的无参 `new()`** — `CollectSink`（`src/ops/generation_runtime.rs:158`）、
@@ -1515,6 +1534,7 @@ GGUF 重量（从 `audio-cpp/AuK-Base-and-Flash-GGUF`）：
 - WAV：16-bit PCM mono writer
 
 待优化（follow-up，no rush）：
+- [ ] **Vulkan 路径的渲染不是逐位可复现的**（2026-11-04 定位）— 同一进程内同一份 prompt + seed 连着渲染：CPU 路径 8/8 逐位相同，Vulkan 路径约 6 次里有 1 次不同（latent rms 1.315 vs 1.162，更差时 rms 2.33）。用 `RMI_AUK_DIT_DUMP` 逐张量比对定位到：`text_conditioning.f32`、`latent_in_0/1.f32`、`velocity_0/1.f32` 都逐位相同，**差异从第 3 个 Euler 步（`velocity_2.f32`）开始**，`velocity_cond_2.f32` 同样分叉 —— 采样参数、随机数、文本条件都是确定的，不稳定性在 DiT 的设备路径内部（嫌疑：tiled F16 kernel 的尾块 / scratch 处理，或共享 arena 的复用）。CLI 每次进程只渲染一次，用户拿到的是"抽签"结果；HTTP 服务连续渲染时更容易撞见。回归哨兵 `tests/auk_pipeline_repeat.rs`（`#[ignore]`，CPU 过 / Vulkan 偶发失败）。**与 HTTP 接入无关**，是 GPU 路径的既有问题。
 - [ ] 数值校准 oracle-diff vs `references/audio.cpp/src/community_models/auk/flow.cpp` — block forward magnitudes drift without the velocity clip
 - [ ] Per-token matmul batching（`linear_into` 一调一次 token，瓶颈；需新增 batched Q8_0 matmul helper 或 thread-local Q8Scratch per rayon worker）
 - [x] **F16 matmul Vulkan path**（done as A：A 任务）— `auk_f16_gpu_runtime`（max_rows=1, max_n_in=4096, max_n_out=9216, descriptor_capacity=4096）+ `f16_gpu_linear_into`（单行 `BatchedLinearRuntime::matmul_rows(format=F16)`）接入 `linear_into_scaled_impl` 的 F16 分支。**pre_quantize F16→Q8_0 workaround（`f4e7879`）已删除**，主路径现在按 GGMLType dispatch——F16 走 F16 GPU，Q8_0 走 Q8 GPU matmul，BF16/Q*_K 走 `QTensorOwned` CPU。消除了 21s 一次性 F16→Q8 load + 1.5 GB cache RAM + post-training quant noise。end-to-end dev 335s（vs 311s baseline Q8 path，持平）。
