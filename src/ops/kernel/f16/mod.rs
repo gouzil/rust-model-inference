@@ -257,6 +257,22 @@ impl<'a> Kernel for F16Kernel<'a> {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+
+        #[cfg(target_arch = "aarch64")]
+        if n_tokens >= 2 && crate::ops::has_neon() {
+            unsafe {
+                neon::matmul_f16_vs_f32_neon_batched(
+                    self.weight,
+                    input,
+                    output,
+                    n_in,
+                    n_out,
+                    n_tokens,
+                );
+            }
+            return;
+        }
+
         for t in 0..n_tokens {
             if forward_f16_dispatch(
                 self.weight,
@@ -597,6 +613,36 @@ mod tests {
 
         // [2*1+3*1, 2*2+3*2, 2*3+3*3] = [5, 10, 15]
         assert_eq!(output, [5.0, 10.0, 15.0]);
+    }
+
+    #[test]
+    fn f16_kernel_batched_matches_single_rows() {
+        let n_tokens = 4;
+        let n_in = 13;
+        let n_out = 3;
+        let weight = f16_bytes(
+            &(0..n_in * n_out)
+                .map(|index| f16::from_f32((index as f32 * 0.07).sin()))
+                .collect::<Vec<_>>(),
+        );
+        let input: Vec<f32> = (0..n_tokens * n_in)
+            .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+            .collect();
+        let kernel = F16Kernel::new(&weight);
+        let mut actual = vec![0.0f32; n_tokens * n_out];
+        let mut expected = vec![0.0f32; n_tokens * n_out];
+
+        kernel.forward_batched(&input, &mut actual, n_in, n_out);
+        for token in 0..n_tokens {
+            kernel.forward(
+                &input[token * n_in..(token + 1) * n_in],
+                &mut expected[token * n_out..(token + 1) * n_out],
+                n_in,
+                n_out,
+            );
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
