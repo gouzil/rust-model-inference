@@ -107,7 +107,36 @@ time.
 3. Only then the grouped convolution (point 4), which is a small shader change once 1 and 2
    are in place.
 
-## 5. The chain, concretely
+## 5. The chain, as landed
+
+`Conv3dChainRuntime` (`src/vulkan/ops.rs`) keeps two activation buffers on the device, writes
+every weight and bias of the run before the first dispatch, records one dispatch per step into
+a single command buffer and waits once. The kernel grew a `relu` bit, so the ReLU between two
+convolutions happens inside it instead of in a host pass that would force a round trip.
+`ops::nn::conv2d_chain` / `conv3d_chain` derive each step's shape, check the run lines up, and
+fall back to `conv3d_with_options` step by step when the run cannot go to the device.
+
+The detector and the recognizer both hand their `dw conv -> ReLU -> pw conv` block to it, so
+the two submissions of every block become one and the intermediate never leaves the card.
+
+What is verified, and what is not:
+
+| check | result |
+| --- | --- |
+| chain's host path vs step-by-step convolutions | bit-identical (`conv3d_chain_matches_separate_convolutions`) |
+| detector fixture after the wiring | `prob` 7.153e-7 / 6.855e-7, unchanged |
+| recognizer fixture after the wiring | `ids` 0/1064, worst `conf` 2.682e-6, unchanged |
+| three page fixtures after the wiring | line for line, same mean confidences |
+| `receipt.png --threads 8` on the host | 0.14 s, unchanged |
+| chain's **device** path | **not run**: needs a Vulkan device (`conv3d_chain_matches_the_device`) |
+
+The expected effect when it is run: submissions per page drop from 2072 to roughly half of
+that (one per block instead of two), and the wall clock follows. If it does not, the first
+thing to check is that the region ping-pong in `Conv3dChainRuntime::run` really alternates --
+a chain that writes into the region it just read would still produce plausible numbers for
+one step and garbage for the next.
+
+## 5a. The original plan
 
 The measurements above say the page spends about 0.3 ms per device convolution on
 submit-and-fence latency, 2072 times. Removing that means recording a run of convolutions
