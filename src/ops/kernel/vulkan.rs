@@ -313,7 +313,7 @@ pub(crate) fn try_conv3d(
     output_shape: [usize; 4],
     spec: crate::ops::nn::Conv3dSpec,
 ) -> bool {
-    if !offload_enabled() || spec.groups != 1 {
+    if !offload_enabled() {
         return false;
     }
     let Some(context) = crate::ops::get_vulkan_context() else {

@@ -2272,6 +2272,16 @@ pub(crate) struct Conv3dRuntime {
     ops: Qwen3Ops<'static>,
     regions: [ArenaRegion; 4],
     pub(crate) capacity: [usize; 4],
+    /// Pointer and length of the weight and bias already staged in the arena.
+    ///
+    /// The kernels of one graph are constants, and a page calls the same
+    /// convolution once per row of text, so re-uploading a weight that is
+    /// already resident costs more than the convolution itself. The identity is
+    /// the address and the length, the same key `Conv2dRuntime` uses for its
+    /// static weight buffers: a caller that rewrites a weight in place would
+    /// have to invalidate this, and no caller does -- weights come from the
+    /// packed file and never move.
+    resident: Option<(usize, usize, usize, usize)>,
 }
 
 impl Conv3dRuntime {
@@ -2290,6 +2300,7 @@ impl Conv3dRuntime {
             ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
             regions,
             capacity,
+            resident: None,
         })
     }
 
@@ -2320,6 +2331,7 @@ impl Conv3dRuntime {
             .chain(spec.stride)
             .chain(spec.padding)
             .chain(spec.dilation)
+            .chain([spec.groups, weight_shape[1]])
         {
             push.push(as_u32(n, "Conv3D geometry")?);
         }
@@ -2331,11 +2343,20 @@ impl Conv3dRuntime {
         )?;
         let commands = TokenCommands::begin(self.ops.context)?;
         self.ops.write_f32(ir, input)?;
-        self.ops.write_f32(wr, weight)?;
-        if let Some(bias) = bias {
-            self.ops.write_f32(br, bias)?;
-        } else {
-            self.ops.zero_region(br)?;
+        let key = (
+            weight.as_ptr() as usize,
+            weight.len(),
+            bias.map_or(0, |bias| bias.as_ptr() as usize),
+            bias.map_or(0, |bias| bias.len()),
+        );
+        if self.resident != Some(key) {
+            self.ops.write_f32(wr, weight)?;
+            if let Some(bias) = bias {
+                self.ops.write_f32(br, bias)?;
+            } else {
+                self.ops.zero_region(br)?;
+            }
+            self.resident = Some(key);
         }
         self.ops.record_linear_dispatch(
             &commands,

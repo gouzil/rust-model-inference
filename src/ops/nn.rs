@@ -2516,12 +2516,17 @@ mod tests {
     }
 
     /// The device convolution against the CPU kernel, on the shapes a
-    /// depthwise-separable detector uses: 1x1 and 3x3 kernels, stride 1 and 2,
-    /// and a 5x5 depthwise-style kernel. Ignored by default because it needs a
-    /// Vulkan device; run it with `--features vulkan` on one.
+    /// depthwise-separable detector uses: 1x1, 3x3 and 5x5 kernels, stride 1
+    /// and 2, and grouped (depthwise) convolutions. Ignored by default because
+    /// it needs a Vulkan device; run it with `--features vulkan` on one.
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn conv3d_matches_the_device_across_kernel_shapes() {
+        crate::ops::enable_gpu();
+        assert!(
+            crate::ops::get_vulkan_context().is_some(),
+            "this test needs a Vulkan device"
+        );
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut next = || {
             seed ^= seed << 13;
@@ -2536,10 +2541,16 @@ mod tests {
             (64, 20, 20, 1, 1, 5),
             (64, 20, 20, 2, 1, 5),
             (128, 8, 8, 1, 1, 1),
+            (2, 3, 3, 1, 2, 3),
+            (8, 6, 6, 1, 8, 3),
+            (32, 16, 32, 2, 32, 3),
+            (128, 4, 16, 1, 128, 3),
         ] {
+            let weight_channels = channels / groups;
             let input: Vec<f32> = (0..channels * height * width).map(|_| next()).collect();
-            let weight: Vec<f32> =
-                (0..channels * (channels / groups) * kernel * kernel).map(|_| next()).collect();
+            let weight: Vec<f32> = (0..channels * weight_channels * kernel * kernel)
+                .map(|_| next())
+                .collect();
             let bias: Vec<f32> = (0..channels).map(|_| next()).collect();
             let pad = kernel / 2;
             let spec = Conv3dSpec {
@@ -2549,7 +2560,7 @@ mod tests {
                 groups,
             };
             let shape = [channels, 1, height, width];
-            let weight_shape = [channels, channels / groups, 1, kernel, kernel];
+            let weight_shape = [channels, weight_channels, 1, kernel, kernel];
             let out_h = (height + 2 * pad - kernel) / stride + 1;
             let out_w = (width + 2 * pad - kernel) / stride + 1;
             let (want, _) = {
@@ -2565,11 +2576,6 @@ mod tests {
                 )
                 .unwrap()
             };
-            crate::ops::enable_gpu();
-            assert!(
-                crate::ops::get_vulkan_context().is_some(),
-                "this test needs a Vulkan device"
-            );
             let (got, _) = {
                 let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
                 conv3d_with_options(
@@ -2584,44 +2590,74 @@ mod tests {
                 .unwrap()
             };
             let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1.0);
-            let mut worst = 0.0f32;
-            let mut at = 0;
-            for (index, (a, b)) in got.iter().zip(&want).enumerate() {
-                if (a - b).abs() > worst {
-                    worst = (a - b).abs();
-                    at = index;
-                }
-            }
+            let worst = got
+                .iter()
+                .zip(&want)
+                .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
             println!(
-                "conv groups={groups} {channels}x{height}x{width} stride {stride} -> {out_h}x{out_w}: worst {worst:.3e} (tolerance {:.3e}) at {at}",
+                "conv groups={groups} {channels}x{height}x{width} k{kernel} stride {stride} -> {out_h}x{out_w}: worst {worst:.3e} (limit {:.3e})",
                 1.0e-4 * scale
             );
-            if worst > 1.0e-4 * scale {
-                let channel = at / (out_h * out_w);
-                let rest = at % (out_h * out_w);
-                println!(
-                    "  FAIL channel {channel} y {} x {} got {} want {}",
-                    rest / out_w,
-                    rest % out_w,
-                    got[at],
-                    want[at]
-                );
-                if channels <= 8 && out_h * out_w <= 4 {
-                    for c in 0..channels {
-                        let base = c * out_h * out_w;
-                        println!(
-                            "  ch{c}: got {:?} want {:?}",
-                            &got[base..base + out_h * out_w],
-                            &want[base..base + out_h * out_w]
-                        );
-                    }
-                }
-            }
             assert!(
                 worst <= 1.0e-4 * scale,
-                "conv groups={groups} {channels}x{height}x{width} stride {stride}: worst {worst:.3e} at {at} (got {} want {})",
-                got[at],
-                want[at]
+                "conv groups={groups} {channels}x{height}x{width} k{kernel} stride {stride}: worst {worst:.3e}"
+            );
+        }
+    }
+
+    /// The device attention against the CPU kernel, on shapes an OCR page's
+    /// cross-attention uses (few queries, many keys) and on a causal one.
+    /// Ignored by default: it needs a Vulkan device.
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn attention_matches_the_device() {
+        crate::ops::enable_gpu();
+        assert!(
+            crate::ops::get_vulkan_context().is_some(),
+            "this test needs a Vulkan device"
+        );
+        let mut seed = 0xdead_beef_1234_5678u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5
+        };
+        for &(queries, keys, heads, kv_heads, head_dim, causal) in &[
+            (8usize, 1024usize, 4usize, 4usize, 64usize, false),
+            (64, 64, 4, 4, 64, true),
+            (16, 32, 8, 2, 32, false),
+            (1, 2048, 4, 4, 64, false),
+        ] {
+            let spec = AttentionSpec {
+                query_tokens: queries,
+                key_tokens: keys,
+                query_heads: heads,
+                key_value_heads: kv_heads,
+                head_dim,
+                causal,
+                scale: 1.0 / (head_dim as f32).sqrt(),
+            };
+            let q: Vec<f32> = (0..queries * heads * head_dim).map(|_| next()).collect();
+            let k: Vec<f32> = (0..keys * kv_heads * head_dim).map(|_| next()).collect();
+            let v: Vec<f32> = (0..keys * kv_heads * head_dim).map(|_| next()).collect();
+            let want = attention_on_cpu(&q, &k, &v, spec).unwrap();
+            let got = {
+                let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+                attention_scalar_f32(&q, &k, &v, spec).unwrap()
+            };
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1.0e-6);
+            let worst = got
+                .iter()
+                .zip(&want)
+                .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+            println!(
+                "attention {queries}x{keys} heads {heads}/{kv_heads} dim {head_dim} causal {causal}: worst {worst:.3e} (limit {:.3e})",
+                1.0e-4 * scale
+            );
+            assert!(
+                worst <= 1.0e-4 * scale,
+                "attention {queries}x{keys} heads {heads}/{kv_heads} dim {head_dim} causal {causal}: worst {worst:.3e}"
             );
         }
     }
