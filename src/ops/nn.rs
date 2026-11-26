@@ -1383,10 +1383,21 @@ pub struct ConvChainStep<'a> {
     pub bias: Option<&'a [f32]>,
     /// `[out_channels, in_channels / groups, kd, kh, kw]`, the packed layout.
     pub weight_shape: [usize; 5],
-    pub input_shape: [usize; 4],
     pub spec: Conv3dSpec,
     /// Apply ReLU to this step's output, inside the kernel when the run goes to
     /// the device.
+    pub relu: bool,
+}
+
+/// One 2-D convolution of a [`conv2d_chain`] run.
+pub struct ConvChainStep2d<'a> {
+    pub weight: &'a [f32],
+    pub bias: Option<&'a [f32]>,
+    /// `[out_channels, in_channels / groups, kh, kw]`, the packed layout.
+    pub weight_shape: [usize; 4],
+    pub stride: [usize; 2],
+    pub padding: [usize; 2],
+    pub groups: usize,
     pub relu: bool,
 }
 
@@ -1396,26 +1407,26 @@ pub struct ConvChainStep<'a> {
 /// uploads the result for the next one. When the run qualifies, this records
 /// every dispatch into one command buffer and waits once; otherwise it runs the
 /// same steps through [`conv3d_with_options`] so the caller does not care which
-/// happened.
+/// happened. The shapes of the intermediate steps are derived from
+/// `input_shape` and each step's geometry.
 pub fn conv3d_chain(
+    pool: &ComputePool,
+    input_shape: [usize; 4],
     steps: &[ConvChainStep<'_>],
     input: &[f32],
 ) -> Result<(Vec<f32>, [usize; 4]), String> {
-    let Some(first) = steps.first() else {
+    if steps.is_empty() {
         return Err("empty convolution chain".into());
-    };
-    if input.len() != checked_len("Conv3D chain input", &first.input_shape)? {
+    }
+    if input.len() != checked_len("Conv3D chain input", &input_shape)? {
         return Err("Invalid Conv3D chain input".into());
     }
     // The output of one step is the input of the next, so the shapes have to
     // line up before anything runs.
     let mut shapes = Vec::with_capacity(steps.len());
-    let mut shape = first.input_shape;
+    let mut shape = input_shape;
     for step in steps {
-        if step.input_shape != shape {
-            return Err("Conv3D chain shapes do not line up".into());
-        }
-        let [channels, depth, height, width] = step.input_shape;
+        let [channels, depth, height, width] = shape;
         let [out_channels, weight_channels, kd, kh, kw] = step.weight_shape;
         if step.spec.groups == 0
             || channels % step.spec.groups != 0
@@ -1456,20 +1467,23 @@ pub fn conv3d_chain(
     let output_len = checked_len("Conv3D chain output", &output_shape)?;
     #[cfg(feature = "vulkan")]
     {
+        let mut step_shape = input_shape;
         let device_steps: Vec<crate::vulkan::ops::Conv3dChainStep<'_>> = steps
             .iter()
             .zip(&shapes)
-            .map(
-                |(step, &output_shape)| crate::vulkan::ops::Conv3dChainStep {
+            .map(|(step, &output_shape)| {
+                let input_shape = step_shape;
+                step_shape = output_shape;
+                crate::vulkan::ops::Conv3dChainStep {
                     weight: step.weight,
                     bias: step.bias,
                     weight_shape: step.weight_shape,
-                    input_shape: step.input_shape,
+                    input_shape,
                     output_shape,
                     spec: step.spec,
                     relu: step.relu,
-                },
-            )
+                }
+            })
             .collect();
         let mut output = vec![0.0; output_len];
         if crate::ops::kernel::vulkan::try_conv3d_chain(&device_steps, input, &mut output) {
@@ -1477,11 +1491,12 @@ pub fn conv3d_chain(
         }
     }
     let mut values = input.to_vec();
-    for step in steps {
+    let mut step_shape = input_shape;
+    for (step, &shape) in steps.iter().zip(&shapes) {
         let (mut next, _) = conv3d_with_options(
-            &ComputePool::new(1),
+            pool,
             &values,
-            step.input_shape,
+            step_shape,
             step.weight,
             step.weight_shape,
             step.bias,
@@ -1492,12 +1507,50 @@ pub fn conv3d_chain(
                 *value = value.max(0.0);
             }
         }
+        step_shape = shape;
         values = next;
     }
     Ok((values, output_shape))
 }
 
-/// Whether a device convolution must be cross-checked against the CPU kernel.
+/// Runs a run of 2-D convolutions through [`conv3d_chain`].
+pub fn conv2d_chain(
+    pool: &ComputePool,
+    input_shape: [usize; 3],
+    steps: &[ConvChainStep2d<'_>],
+    input: &[f32],
+) -> Result<(Vec<f32>, [usize; 3]), String> {
+    let steps: Vec<ConvChainStep<'_>> = steps
+        .iter()
+        .map(|step| ConvChainStep {
+            weight: step.weight,
+            bias: step.bias,
+            weight_shape: [
+                step.weight_shape[0],
+                step.weight_shape[1],
+                1,
+                step.weight_shape[2],
+                step.weight_shape[3],
+            ],
+            spec: Conv3dSpec {
+                stride: [1, step.stride[0], step.stride[1]],
+                padding: [0, step.padding[0], step.padding[1]],
+                dilation: [1, 1, 1],
+                groups: step.groups,
+            },
+            relu: step.relu,
+        })
+        .collect();
+    let (output, shape) = conv3d_chain(
+        pool,
+        [input_shape[0], 1, input_shape[1], input_shape[2]],
+        &steps,
+        input,
+    )?;
+    Ok((output, [shape[0], shape[2], shape[3]]))
+}
+
+/// Whether a device convolution must be cross-checked against the CPU kernel./// Whether a device convolution must be cross-checked against the CPU kernel.
 ///
 /// The check is opt-in, matching `RMI_GPU_CPU_CHECK` on the linear path:
 /// `RMI_GPU_CPU_CHECK=1` turns it on for both projections and convolutions, and
@@ -2830,7 +2883,6 @@ mod tests {
                 weight: &weights[index],
                 bias: Some(&biases[index]),
                 weight_shape: [out_channels, shape[0], 1, kernel, kernel],
-                input_shape: shape,
                 spec,
                 relu,
             });
@@ -2853,7 +2905,8 @@ mod tests {
             want = values.clone();
             shape = next_shape;
         }
-        let (got, got_shape) = conv3d_chain(&steps, &input).unwrap();
+        let (got, got_shape) =
+            conv3d_chain(&ComputePool::new(1), input_shape, &steps, &input).unwrap();
         assert_eq!(got_shape, shape);
         assert_eq!(got.len(), want.len());
         for (index, (a, b)) in got.iter().zip(&want).enumerate() {
@@ -2921,18 +2974,21 @@ mod tests {
                 weight: &weights[index],
                 bias: Some(&biases[index]),
                 weight_shape: weight_shapes[index],
-                input_shape: input_shapes[index],
                 spec: specs[index],
                 relu: geometry[index].5,
             })
             .collect();
         let want = {
             let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
-            conv3d_chain(&steps, &input).unwrap().0
+            conv3d_chain(&ComputePool::new(1), input_shape, &steps, &input)
+                .unwrap()
+                .0
         };
         let got = {
             let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
-            conv3d_chain(&steps, &input).unwrap().0
+            conv3d_chain(&ComputePool::new(1), input_shape, &steps, &input)
+                .unwrap()
+                .0
         };
         let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1.0);
         let worst = got

@@ -169,9 +169,30 @@ impl Block {
         x: &[f32],
         shape: [usize; 3],
     ) -> Result<(Vec<f32>, [usize; 3]), String> {
-        let (mut values, next) = self.dw.forward(pool, x, shape)?;
-        relu_inplace(&mut values);
-        let (mut values, next) = self.pw.forward(pool, &values, next)?;
+        // The depthwise and the pointwise convolution run as one chain: the
+        // ReLU between them happens inside the kernel, so a device keeps the
+        // intermediate on the card instead of round tripping it.
+        let steps = [
+            crate::ops::nn::ConvChainStep2d {
+                weight: &self.dw.weight,
+                bias: self.dw.bias.as_deref(),
+                weight_shape: self.dw.shape,
+                stride: self.dw.stride,
+                padding: self.dw.padding,
+                groups: self.dw.groups,
+                relu: true,
+            },
+            crate::ops::nn::ConvChainStep2d {
+                weight: &self.pw.weight,
+                bias: self.pw.bias.as_deref(),
+                weight_shape: self.pw.shape,
+                stride: self.pw.stride,
+                padding: self.pw.padding,
+                groups: self.pw.groups,
+                relu: false,
+            },
+        ];
+        let (mut values, next) = crate::ops::nn::conv2d_chain(pool, shape, &steps, x)?;
         if self.residual {
             if values.len() != x.len() {
                 return Err(format!(
