@@ -41,9 +41,7 @@ impl HySimulMt {
     ) -> Result<Self, String> {
         compute.check_build()?;
         if compute == ComputePolicy::Vulkan {
-            return Err(
-                "Hy-SimulMT uses hybrid linear offload; choose --compute auto or cpu".into(),
-            );
+            return Err("hy_v3 uses hybrid linear offload; choose --compute auto or cpu".into());
         }
         if source
             .metadata("general.architecture")

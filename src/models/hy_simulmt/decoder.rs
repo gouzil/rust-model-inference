@@ -27,9 +27,7 @@ impl<'model> HySession<'model> {
     ) -> Result<Self, String> {
         compute.check_build()?;
         if compute == ComputePolicy::Vulkan {
-            return Err(
-                "Hy-SimulMT uses hybrid linear offload; choose --compute auto or cpu".into(),
-            );
+            return Err("hy_v3 uses hybrid linear offload; choose --compute auto or cpu".into());
         }
         let c = &model.config;
         if capacity == 0 || capacity > c.n_ctx {
@@ -107,6 +105,20 @@ impl<'model> HySession<'model> {
 
     pub fn position(&self) -> usize {
         self.kv.seq_len
+    }
+
+    /// Rewind the session to an empty sequence so the next [`Self::forward`]
+    /// starts at position 0.
+    ///
+    /// Only `seq_len` is rewound. The K/V bytes are deliberately *not* cleared:
+    /// [`Self::attention`] reads positions `0..visible`, and every slot below
+    /// the new `seq_len` is overwritten before it can be read again, so zeroing
+    /// a multi-gigabyte cache per request would buy nothing. Callers that reuse
+    /// one session across requests (the text runtime) must call this first,
+    /// otherwise RoPE positions and the attention window carry over from the
+    /// previous request.
+    pub fn reset(&mut self) {
+        self.kv.seq_len = 0;
     }
 
     pub fn forward(
