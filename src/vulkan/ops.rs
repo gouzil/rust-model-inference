@@ -2331,7 +2331,7 @@ impl Conv3dRuntime {
             .chain(spec.stride)
             .chain(spec.padding)
             .chain(spec.dilation)
-            .chain([spec.groups, weight_shape[1]])
+            .chain([spec.groups, weight_shape[1], 0])
         {
             push.push(as_u32(n, "Conv3D geometry")?);
         }
@@ -2367,6 +2367,165 @@ impl Conv3dRuntime {
         );
         commands.submit_and_wait()?;
         output.copy_from_slice(self.ops.read_f32(or, output.len())?);
+        Ok(())
+    }
+}
+
+/// One convolution of a chain that runs without returning to the host.
+pub(crate) struct Conv3dChainStep<'a> {
+    pub(crate) weight: &'a [f32],
+    pub(crate) bias: Option<&'a [f32]>,
+    pub(crate) weight_shape: [usize; 5],
+    pub(crate) input_shape: [usize; 4],
+    pub(crate) output_shape: [usize; 4],
+    pub(crate) spec: crate::ops::nn::Conv3dSpec,
+    /// Apply ReLU to this step's output inside the kernel, so the next step can
+    /// read it without a host pass in between.
+    pub(crate) relu: bool,
+}
+
+/// A run of convolutions recorded into one command buffer.
+///
+/// The page read submits a convolution, waits for it, applies a ReLU on the
+/// host, uploads the result and submits the next one; at 2072 convolutions per
+/// page the fences cost more than the arithmetic. This keeps two activation
+/// buffers on the device, writes every weight of the run up front, and records
+/// the whole run before waiting once. The ReLU between two convolutions is done
+/// by the kernel (`relu` in the push block), which is what makes the run
+/// continuous.
+pub(crate) struct Conv3dChainRuntime {
+    ops: Qwen3Ops<'static>,
+    /// Activation A, activation B, the weights of the run, the biases of the run.
+    regions: [ArenaRegion; 4],
+    pub(crate) capacity: [usize; 4],
+}
+
+impl Conv3dChainRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: [usize; 4],
+    ) -> Result<Self, VulkanError> {
+        let mut cursor = 0;
+        let regions = [
+            f32_region(&mut cursor, capacity[0])?,
+            f32_region(&mut cursor, capacity[1])?,
+            f32_region(&mut cursor, capacity[2])?,
+            f32_region(&mut cursor, capacity[3])?,
+        ];
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            regions,
+            capacity,
+        })
+    }
+
+    pub(crate) fn run(
+        &mut self,
+        steps: &[Conv3dChainStep<'_>],
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(), VulkanError> {
+        let (Some(first), Some(last)) = (steps.first(), steps.last()) else {
+            return Err(VulkanError::UnsupportedShape("empty conv chain".into()));
+        };
+        let [act_a, act_b, weight_region, bias_region] = self.regions;
+        if input.len() != product("conv chain input", &first.input_shape)? {
+            return Err(VulkanError::UnsupportedShape("conv chain input".into()));
+        }
+        if output.len() != product("conv chain output", &last.output_shape)? {
+            return Err(VulkanError::UnsupportedShape("conv chain output".into()));
+        }
+        // Every weight and bias of the run is written before the first dispatch,
+        // so nothing the device is still reading is overwritten mid-run.
+        let mut weights = Vec::new();
+        let mut biases = Vec::new();
+        for step in steps {
+            weights.extend_from_slice(step.weight);
+            let out_channels = step.weight_shape[0];
+            match step.bias {
+                Some(bias) if bias.len() == out_channels => biases.extend_from_slice(bias),
+                _ => biases.extend(std::iter::repeat_n(0.0, out_channels)),
+            }
+        }
+        if weights.len() > self.capacity[2] || biases.len() > self.capacity[3] {
+            return Err(VulkanError::UnsupportedShape("conv chain arena".into()));
+        }
+        let weight_base = self
+            .ops
+            .f32_word(weight_region, weights.len(), "chain weights")?;
+        let bias_base = self
+            .ops
+            .f32_word(bias_region, biases.len(), "chain biases")?;
+        self.ops.write_f32(weight_region, &weights)?;
+        self.ops.write_f32(bias_region, &biases)?;
+        self.ops.write_f32(act_a, input)?;
+
+        let mut weight_at = 0usize;
+        let mut bias_at = 0usize;
+        let mut read_is_a = true;
+        let mut last_region = act_a;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        for (index, step) in steps.iter().enumerate() {
+            let (read_region, write_region) = if read_is_a {
+                (act_a, act_b)
+            } else {
+                (act_b, act_a)
+            };
+            let input_word = self.ops.f32_word(
+                read_region,
+                product("chain input", &step.input_shape)?,
+                "chain in",
+            )?;
+            let output_word = self.ops.f32_word(
+                write_region,
+                product("chain output", &step.output_shape)?,
+                "chain out",
+            )?;
+            let mut push = vec![
+                input_word,
+                weight_base + as_u32(weight_at, "chain weight offset")?,
+                bias_base + as_u32(bias_at, "chain bias offset")?,
+                output_word,
+            ];
+            for n in [step.input_shape[0], step.output_shape[0]]
+                .into_iter()
+                .chain(step.input_shape[1..].iter().copied())
+                .chain(step.output_shape[1..].iter().copied())
+                .chain(step.weight_shape[2..].iter().copied())
+                .chain(step.spec.stride)
+                .chain(step.spec.padding)
+                .chain(step.spec.dilation)
+                .chain([
+                    step.spec.groups,
+                    step.weight_shape[1],
+                    usize::from(step.relu),
+                ])
+            {
+                push.push(as_u32(n, "chain geometry")?);
+            }
+            let spatial = product("chain spatial", &step.output_shape[1..])?;
+            let dispatch = row_dispatch(
+                step.output_shape[0].div_ceil(64),
+                spatial.div_ceil(32),
+                &self.ops.context.limits,
+            )?;
+            self.ops.record_linear_dispatch(
+                &commands,
+                CONV3D_TILED,
+                self.ops.arena_bindings,
+                &push,
+                dispatch,
+            );
+            weight_at += step.weight.len();
+            bias_at += step.weight_shape[0];
+            last_region = write_region;
+            read_is_a = !read_is_a;
+            if index + 1 == steps.len() {
+                break;
+            }
+        }
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(last_region, output.len())?);
         Ok(())
     }
 }

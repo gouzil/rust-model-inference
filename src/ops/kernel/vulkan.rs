@@ -11,6 +11,10 @@ use std::sync::Mutex;
 
 static ATTENTION_RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
     std::sync::OnceLock::new();
+static CONV3D_CHAIN_RUNTIME: std::sync::OnceLock<
+    Mutex<Option<crate::vulkan::ops::Conv3dChainRuntime>>,
+> = std::sync::OnceLock::new();
+
 static CONV3D_RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> =
     std::sync::OnceLock::new();
 
@@ -348,6 +352,66 @@ pub(crate) fn try_conv3d(
         Ok(()) if output.iter().all(|v| v.is_finite()) => true,
         Ok(()) => {
             crate::vulkan::mark_gpu_broken("non-finite Conv3D output");
+            *state = None;
+            false
+        }
+        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+        Err(error) => {
+            crate::vulkan::mark_gpu_broken(&error.to_string());
+            *state = None;
+            false
+        }
+    }
+}
+
+/// A run of convolutions recorded into one command buffer.
+///
+/// Returns `false` when the run cannot go to the device, in which case the
+/// caller runs it on the host step by step.
+pub(crate) fn try_conv3d_chain(
+    steps: &[crate::vulkan::ops::Conv3dChainStep<'_>],
+    input: &[f32],
+    output: &mut [f32],
+) -> bool {
+    if !offload_enabled() || steps.is_empty() {
+        return false;
+    }
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        return false;
+    };
+    let mut activation = 0usize;
+    let mut weights = 0usize;
+    let mut biases = 0usize;
+    for step in steps {
+        let input_len = step.input_shape.iter().product::<usize>();
+        let output_len = step.output_shape.iter().product::<usize>();
+        activation = activation.max(input_len).max(output_len);
+        weights += step.weight.len();
+        biases += step.weight_shape[0];
+    }
+    let needed = [activation, activation, weights, biases];
+    let mut state = CONV3D_CHAIN_RUNTIME
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap();
+    let result = (|| {
+        if state
+            .as_ref()
+            .is_none_or(|runtime| needed.iter().zip(runtime.capacity).any(|(&n, c)| n > c))
+        {
+            let old = state.as_ref().map_or([0; 4], |runtime| runtime.capacity);
+            *state = None;
+            *state = Some(crate::vulkan::ops::Conv3dChainRuntime::new(
+                context,
+                std::array::from_fn(|i| old[i].max(needed[i])),
+            )?);
+        }
+        state.as_mut().unwrap().run(steps, input, output)
+    })();
+    match result {
+        Ok(()) if output.iter().all(|value| value.is_finite()) => true,
+        Ok(()) => {
+            crate::vulkan::mark_gpu_broken("non-finite Conv3D chain output");
             *state = None;
             false
         }

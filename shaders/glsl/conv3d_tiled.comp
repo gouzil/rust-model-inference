@@ -11,7 +11,7 @@ layout(push_constant) uniform PC {
     uint sd; uint sh; uint sw;
     uint pd; uint ph; uint pw;
     uint dd; uint dh; uint dw;
-    uint groups; uint weight_channels;
+    uint groups; uint weight_channels; uint relu;
 } pc;
 const uint TOKENS = 32u;
 const uint CHUNK = 128u;
@@ -71,7 +71,14 @@ void main() {
         }
     }
     float bias = uintBitsToFloat(arena.data[pc.bias_word + min(column, pc.output_channels - 1u)]);
-    for (uint t = 0u; t < live; t++) stage[lane * TOKENS + t] = acc[t] + bias;
+    for (uint t = 0u; t < live; t++) {
+        float value = acc[t] + bias;
+        // A chain of convolutions keeps its activations on the device, so the
+        // ReLU that sits between two of them has to happen here rather than in
+        // a host pass that would force a round trip.
+        if (pc.relu != 0u) value = max(value, 0.0);
+        stage[lane * TOKENS + t] = value;
+    }
     barrier();
     uint t = lane % TOKENS;
     for (uint c = lane / TOKENS; c < 64u; c += 2u) {

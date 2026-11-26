@@ -1377,6 +1377,126 @@ pub fn conv3d_with_options(
     Ok((output, output_shape))
 }
 
+/// One convolution of a [`conv3d_chain`] run.
+pub struct ConvChainStep<'a> {
+    pub weight: &'a [f32],
+    pub bias: Option<&'a [f32]>,
+    /// `[out_channels, in_channels / groups, kd, kh, kw]`, the packed layout.
+    pub weight_shape: [usize; 5],
+    pub input_shape: [usize; 4],
+    pub spec: Conv3dSpec,
+    /// Apply ReLU to this step's output, inside the kernel when the run goes to
+    /// the device.
+    pub relu: bool,
+}
+
+/// Runs a run of convolutions, keeping the activations on the device.
+///
+/// A page read submits one convolution, waits, applies a ReLU on the host and
+/// uploads the result for the next one. When the run qualifies, this records
+/// every dispatch into one command buffer and waits once; otherwise it runs the
+/// same steps through [`conv3d_with_options`] so the caller does not care which
+/// happened.
+pub fn conv3d_chain(
+    steps: &[ConvChainStep<'_>],
+    input: &[f32],
+) -> Result<(Vec<f32>, [usize; 4]), String> {
+    let Some(first) = steps.first() else {
+        return Err("empty convolution chain".into());
+    };
+    if input.len() != checked_len("Conv3D chain input", &first.input_shape)? {
+        return Err("Invalid Conv3D chain input".into());
+    }
+    // The output of one step is the input of the next, so the shapes have to
+    // line up before anything runs.
+    let mut shapes = Vec::with_capacity(steps.len());
+    let mut shape = first.input_shape;
+    for step in steps {
+        if step.input_shape != shape {
+            return Err("Conv3D chain shapes do not line up".into());
+        }
+        let [channels, depth, height, width] = step.input_shape;
+        let [out_channels, weight_channels, kd, kh, kw] = step.weight_shape;
+        if step.spec.groups == 0
+            || channels % step.spec.groups != 0
+            || out_channels % step.spec.groups != 0
+            || weight_channels != channels / step.spec.groups
+            || step.weight.len() != out_channels * weight_channels * kd * kh * kw
+            || step.bias.is_some_and(|bias| bias.len() != out_channels)
+        {
+            return Err("Invalid Conv3D chain step".into());
+        }
+        shape = [
+            out_channels,
+            conv_output(
+                depth,
+                kd,
+                step.spec.stride[0],
+                step.spec.padding[0],
+                step.spec.dilation[0],
+            )?,
+            conv_output(
+                height,
+                kh,
+                step.spec.stride[1],
+                step.spec.padding[1],
+                step.spec.dilation[1],
+            )?,
+            conv_output(
+                width,
+                kw,
+                step.spec.stride[2],
+                step.spec.padding[2],
+                step.spec.dilation[2],
+            )?,
+        ];
+        shapes.push(shape);
+    }
+    let output_shape = *shapes.last().unwrap();
+    let output_len = checked_len("Conv3D chain output", &output_shape)?;
+    #[cfg(feature = "vulkan")]
+    {
+        let device_steps: Vec<crate::vulkan::ops::Conv3dChainStep<'_>> = steps
+            .iter()
+            .zip(&shapes)
+            .map(
+                |(step, &output_shape)| crate::vulkan::ops::Conv3dChainStep {
+                    weight: step.weight,
+                    bias: step.bias,
+                    weight_shape: step.weight_shape,
+                    input_shape: step.input_shape,
+                    output_shape,
+                    spec: step.spec,
+                    relu: step.relu,
+                },
+            )
+            .collect();
+        let mut output = vec![0.0; output_len];
+        if crate::ops::kernel::vulkan::try_conv3d_chain(&device_steps, input, &mut output) {
+            return Ok((output, output_shape));
+        }
+    }
+    let mut values = input.to_vec();
+    for step in steps {
+        let (mut next, _) = conv3d_with_options(
+            &ComputePool::new(1),
+            &values,
+            step.input_shape,
+            step.weight,
+            step.weight_shape,
+            step.bias,
+            step.spec,
+        )?;
+        if step.relu {
+            for value in next.iter_mut() {
+                *value = value.max(0.0);
+            }
+        }
+        values = next;
+    }
+    Ok((values, output_shape))
+}
+
 /// Whether a device convolution must be cross-checked against the CPU kernel.
 ///
 /// The check is opt-in, matching `RMI_GPU_CPU_CHECK` on the linear path:
@@ -2662,5 +2782,167 @@ mod tests {
                 "attention {queries}x{keys} heads {heads}/{kv_heads} dim {head_dim} causal {causal}: worst {worst:.3e}"
             );
         }
+    }
+
+    /// The chain's host path has to be the same arithmetic as calling the
+    /// convolutions one at a time: it is what runs whenever the run does not
+    /// qualify for the device.
+    #[test]
+    fn conv3d_chain_matches_separate_convolutions() {
+        let mut seed = 0x0bad_c0de_f00d_1234u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5
+        };
+        let input_shape = [8usize, 1, 6, 6];
+        let input: Vec<f32> = (0..8 * 36).map(|_| next()).collect();
+        let geometry: [(usize, usize, usize, usize, bool); 3] = [
+            (8, 3, 1, 1, true),
+            (16, 3, 2, 1, true),
+            (16, 1, 1, 0, false),
+        ];
+        let mut weights = Vec::new();
+        let mut biases = Vec::new();
+        let mut in_channels = input_shape[0];
+        for &(out_channels, kernel, _, _, _) in &geometry {
+            weights.push(
+                (0..out_channels * in_channels * kernel * kernel)
+                    .map(|_| next())
+                    .collect::<Vec<_>>(),
+            );
+            biases.push((0..out_channels).map(|_| next()).collect::<Vec<_>>());
+            in_channels = out_channels;
+        }
+        let mut steps = Vec::new();
+        let mut shape = input_shape;
+        let mut values = input.clone();
+        let mut want = Vec::new();
+        for (index, &(out_channels, kernel, stride, pad, relu)) in geometry.iter().enumerate() {
+            let spec = Conv3dSpec {
+                stride: [1, stride, stride],
+                padding: [0, pad, pad],
+                dilation: [1, 1, 1],
+                groups: 1,
+            };
+            steps.push(ConvChainStep {
+                weight: &weights[index],
+                bias: Some(&biases[index]),
+                weight_shape: [out_channels, shape[0], 1, kernel, kernel],
+                input_shape: shape,
+                spec,
+                relu,
+            });
+            let (mut next_values, next_shape) = conv3d_with_options(
+                &ComputePool::new(1),
+                &values,
+                shape,
+                &weights[index],
+                [out_channels, shape[0], 1, kernel, kernel],
+                Some(&biases[index]),
+                spec,
+            )
+            .unwrap();
+            if relu {
+                for value in next_values.iter_mut() {
+                    *value = value.max(0.0);
+                }
+            }
+            values = next_values;
+            want = values.clone();
+            shape = next_shape;
+        }
+        let (got, got_shape) = conv3d_chain(&steps, &input).unwrap();
+        assert_eq!(got_shape, shape);
+        assert_eq!(got.len(), want.len());
+        for (index, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "element {index}: {a} vs {b}");
+        }
+    }
+
+    /// The device chain against the host one. Ignored by default: it needs a
+    /// Vulkan device.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn conv3d_chain_matches_the_device() {
+        crate::ops::enable_gpu();
+        assert!(
+            crate::ops::get_vulkan_context().is_some(),
+            "this test needs a Vulkan device"
+        );
+        let mut seed = 0xfeed_face_1234_5678u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5
+        };
+        let geometry: [(usize, usize, usize, usize, usize, bool); 4] = [
+            (8, 3, 1, 1, 1, true),
+            (16, 3, 1, 1, 1, true),
+            (16, 1, 1, 0, 1, true),
+            (32, 3, 2, 1, 32, false),
+        ];
+        let input_shape = [8usize, 1, 6, 6];
+        let input: Vec<f32> = (0..8 * 36).map(|_| next()).collect();
+        let mut weights: Vec<Vec<f32>> = Vec::new();
+        let mut biases: Vec<Vec<f32>> = Vec::new();
+        let mut weight_shapes = Vec::new();
+        let mut input_shapes = Vec::new();
+        let mut specs = Vec::new();
+        let mut shape = input_shape;
+        for &(out_channels, kernel, stride, pad, groups, _) in &geometry {
+            let weight_channels = shape[0] / groups;
+            weights.push(
+                (0..out_channels * weight_channels * kernel * kernel)
+                    .map(|_| next())
+                    .collect(),
+            );
+            biases.push((0..out_channels).map(|_| next()).collect());
+            weight_shapes.push([out_channels, weight_channels, 1, kernel, kernel]);
+            input_shapes.push(shape);
+            specs.push(Conv3dSpec {
+                stride: [1, stride, stride],
+                padding: [0, pad, pad],
+                dilation: [1, 1, 1],
+                groups,
+            });
+            shape = [
+                out_channels,
+                (shape[1] + 2 * pad - kernel) / stride + 1,
+                (shape[2] + 2 * pad - kernel) / stride + 1,
+                (shape[3] + 2 * pad - kernel) / stride + 1,
+            ];
+        }
+        let steps: Vec<ConvChainStep<'_>> = (0..geometry.len())
+            .map(|index| ConvChainStep {
+                weight: &weights[index],
+                bias: Some(&biases[index]),
+                weight_shape: weight_shapes[index],
+                input_shape: input_shapes[index],
+                spec: specs[index],
+                relu: geometry[index].5,
+            })
+            .collect();
+        let want = {
+            let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+            conv3d_chain(&steps, &input).unwrap().0
+        };
+        let got = {
+            let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+            conv3d_chain(&steps, &input).unwrap().0
+        };
+        let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1.0);
+        let worst = got
+            .iter()
+            .zip(&want)
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!(
+            "conv chain: worst {worst:.3e} (limit {:.3e})",
+            1.0e-4 * scale
+        );
+        assert!(worst <= 1.0e-4 * scale, "conv chain: worst {worst:.3e}");
     }
 }
