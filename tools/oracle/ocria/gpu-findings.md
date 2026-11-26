@@ -106,3 +106,44 @@ time.
    device is slower than the host.
 3. Only then the grouped convolution (point 4), which is a small shader change once 1 and 2
    are in place.
+
+## 5. The chain, concretely
+
+The measurements above say the page spends about 0.3 ms per device convolution on
+submit-and-fence latency, 2072 times. Removing that means recording a run of convolutions
+into one command buffer and waiting once. Three things have to change together, and the
+first one is what makes the other two possible.
+
+**5.1 Weights out of the arena.** Today the weight is written into an arena region before
+each dispatch, which is why the dispatches cannot share a command buffer: the host would be
+rewriting memory the GPU has not read yet. Weights are graph constants, so they belong in
+per-convolution static buffers (`VulkanContext::upload_static`, the mechanism
+`Conv2dRuntime` already uses), bound through `bind_weight_buffers_mode`. The shader gains
+`layout(std430, binding = 1) buffer W { uint weight[]; }` and reads `weight[row_base + i]`
+instead of `arena.data[pc.weight_word + row_base + i]`; `pc.weight_word` disappears from the
+push block. This is the piece that needs device iteration to get right -- the descriptor set
+layout of the conv pipeline has to match what `bind_weight_buffers_mode` builds -- and it is
+the reason the work is not done yet: the AMD box went away mid-round and the local MoltenVK
+rejects this shader ("Shader compile failed: Initialization of an object has failed"), so
+there is no device to check it on.
+
+**5.2 Two activation regions and a recording pass.** `Conv3dRuntime` grows a second pair of
+activation regions and a `chain` entry point: it uploads the first activation once, records
+one dispatch per step into a single `TokenCommands`, alternating regions, and submits and
+waits once at the end. Each step carries `(weight buffer, bias, geometry, relu flag)`.
+
+**5.3 ReLU in the kernel.** A `relu` bit in the push block makes the store
+`max(acc[t] + bias, 0)`, so a conv-ReLU-conv run needs no host pass between the dispatches.
+That is what lets the chain cross layer boundaries at all: today every layer boundary forces
+a `submit_and_wait` because the host applies the ReLU.
+
+**5.4 What the host loops have to look like.** `det.rs` and `rec.rs` currently call
+`ops::conv2d` per layer and materialise a `Vec<f32>` each time. A chain needs those loops to
+collect `(weight, bias, geometry, relu)` runs and hand them over as one call, breaking the
+run where a pooling, concatenation or slice happens. The detector alternates conv runs with
+pooling, so the expected win is a handful of submissions per stage rather than one per
+convolution; the recognizer's CTC stack is the cleaner target and should be done first.
+
+**5.5 What to measure when the device is back.** Submission count per page
+(`RMI_COMPUTE_TRACE` counters) should drop from 2072 to the low tens, and the wall clock
+should follow it. Anything less means a host pass crept back in between the dispatches.
