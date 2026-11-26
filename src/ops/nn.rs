@@ -2514,4 +2514,115 @@ mod tests {
             }
         }
     }
+
+    /// The device convolution against the CPU kernel, on the shapes a
+    /// depthwise-separable detector uses: 1x1 and 3x3 kernels, stride 1 and 2,
+    /// and a 5x5 depthwise-style kernel. Ignored by default because it needs a
+    /// Vulkan device; run it with `--features vulkan` on one.
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn conv3d_matches_the_device_across_kernel_shapes() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5
+        };
+        for &(channels, height, width, stride, groups, kernel) in &[
+            (8usize, 6usize, 6usize, 1usize, 1usize, 3usize),
+            (32, 16, 32, 2, 1, 3),
+            (32, 16, 32, 2, 1, 1),
+            (64, 20, 20, 1, 1, 5),
+            (64, 20, 20, 2, 1, 5),
+            (128, 8, 8, 1, 1, 1),
+        ] {
+            let input: Vec<f32> = (0..channels * height * width).map(|_| next()).collect();
+            let weight: Vec<f32> =
+                (0..channels * (channels / groups) * kernel * kernel).map(|_| next()).collect();
+            let bias: Vec<f32> = (0..channels).map(|_| next()).collect();
+            let pad = kernel / 2;
+            let spec = Conv3dSpec {
+                stride: [1, stride, stride],
+                padding: [0, pad, pad],
+                dilation: [1, 1, 1],
+                groups,
+            };
+            let shape = [channels, 1, height, width];
+            let weight_shape = [channels, channels / groups, 1, kernel, kernel];
+            let out_h = (height + 2 * pad - kernel) / stride + 1;
+            let out_w = (width + 2 * pad - kernel) / stride + 1;
+            let (want, _) = {
+                let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+                conv3d_with_options(
+                    &ComputePool::new(1),
+                    &input,
+                    shape,
+                    &weight,
+                    weight_shape,
+                    Some(&bias),
+                    spec,
+                )
+                .unwrap()
+            };
+            crate::ops::enable_gpu();
+            assert!(
+                crate::ops::get_vulkan_context().is_some(),
+                "this test needs a Vulkan device"
+            );
+            let (got, _) = {
+                let _auto = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+                conv3d_with_options(
+                    &ComputePool::new(1),
+                    &input,
+                    shape,
+                    &weight,
+                    weight_shape,
+                    Some(&bias),
+                    spec,
+                )
+                .unwrap()
+            };
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1.0);
+            let mut worst = 0.0f32;
+            let mut at = 0;
+            for (index, (a, b)) in got.iter().zip(&want).enumerate() {
+                if (a - b).abs() > worst {
+                    worst = (a - b).abs();
+                    at = index;
+                }
+            }
+            println!(
+                "conv groups={groups} {channels}x{height}x{width} stride {stride} -> {out_h}x{out_w}: worst {worst:.3e} (tolerance {:.3e}) at {at}",
+                1.0e-4 * scale
+            );
+            if worst > 1.0e-4 * scale {
+                let channel = at / (out_h * out_w);
+                let rest = at % (out_h * out_w);
+                println!(
+                    "  FAIL channel {channel} y {} x {} got {} want {}",
+                    rest / out_w,
+                    rest % out_w,
+                    got[at],
+                    want[at]
+                );
+                if channels <= 8 && out_h * out_w <= 4 {
+                    for c in 0..channels {
+                        let base = c * out_h * out_w;
+                        println!(
+                            "  ch{c}: got {:?} want {:?}",
+                            &got[base..base + out_h * out_w],
+                            &want[base..base + out_h * out_w]
+                        );
+                    }
+                }
+            }
+            assert!(
+                worst <= 1.0e-4 * scale,
+                "conv groups={groups} {channels}x{height}x{width} stride {stride}: worst {worst:.3e} at {at} (got {} want {})",
+                got[at],
+                want[at]
+            );
+        }
+    }
 }
