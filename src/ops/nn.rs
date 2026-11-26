@@ -2519,6 +2519,7 @@ mod tests {
     /// depthwise-separable detector uses: 1x1, 3x3 and 5x5 kernels, stride 1
     /// and 2, and grouped (depthwise) convolutions. Ignored by default because
     /// it needs a Vulkan device; run it with `--features vulkan` on one.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn conv3d_matches_the_device_across_kernel_shapes() {
@@ -2608,6 +2609,7 @@ mod tests {
     /// The device attention against the CPU kernel, on shapes an OCR page's
     /// cross-attention uses (few queries, many keys) and on a causal one.
     /// Ignored by default: it needs a Vulkan device.
+    #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "needs a Vulkan device"]
     fn attention_matches_the_device() {
